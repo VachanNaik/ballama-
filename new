@@ -1,1 +1,569 @@
-https://huggingface.co/datasets/BALM/BALM-benchmark
+ChemFIE-DTP (DrugTargetPrediction - 221 Classes)
+This model is a BERT-like sequence classifier for 221 human protein drug targets, fine-tuned from gbyuvd/chemselfies-base-bertmlm on a dataset derived ChemBL34 (Zdrazil et al. 2023). It predicts potential drug targets using chemical structures represented as SELFIES (Self-Referencing Embedded Strings). The model was trained on a selected and balanced dataset of around 154k examples covering 221 distinct human protein targets. Data selection criteria included specific activity types (IC50, Ki, EC50) with values ≤ 10 µM, assay confidence scores ≥ 7, and exact activity relations. Among all drug target classes found in ChemBL34, classes with at least 1000 examples are selected then capped at 1000 for those with more samples. Building upon the pre-trained base model's pre-existing knowledge of SELFIES, this model is originally intended to validate the capabilities of the light-weight base model to be fine-tuned for various tasks, and for this model case, it might be useful for tasks related to early-stage drug discovery and target prediction (e.g. compounds annotations) - though its performance and applicability should be carefully evaluated for specific use cases (see Evaluation)
+
+List of classes available in the "label_dict.json"
+Its performance on each classes available in "test_result.txt"
+Based on the model's training and evaluation losses, there is potential for improvement with further training; however, I cannot afford it at the moment.
+
+Disclaimer: For Academic Purposes Only
+The information and model provided is for academic purposes only. It is intended for educational and research use, and should not be used for any commercial or legal purposes. The author do not guarantee the accuracy, completeness, or reliability of the information.
+
+ko-fi
+
+Table of Contents
+Model Details
+Usage
+SMILES to SELFIES conversion
+Get Top-K Prediction
+Direct Use using Classifier Pipeline
+Training Details
+Evaluation
+General
+Classes with Best Performance (F1>0.9)
+Classes with Good Performance (0.7<F1<0.9)
+Classes with Moderate Performance (0.5<F1<0.7)
+Classes with Limited Performance (0.3<F1<0.5)
+Classes with Poor Performance (0.1<F1<0.3)
+Model Examination
+Technical Specifications
+Citation
+Contact & Support My Work
+Model Details
+Model Description
+Model Type: Transformer (BertForSequenceClassification)
+Base model: gbyuvd/chemselfies-base-bertmlm
+Maximum Sequence Length: 512 tokens
+Number of Labels: 221 classes
+Training Dataset: SELFIES with labels derived from ChemBL34
+Language: SELFIES
+License: CC-BY-NC-SA 4.0
+Uses
+If you have Canonical SMILES instead of SELFIES, you can convert it first into a format readable by the model's tokenizer (using whitespace)
+
+import selfies as sf
+
+def smiles_to_selfies_sentence(smiles):
+    try:
+        selfies = sf.encoder(smiles)  # Encode SMILES into SELFIES
+        selfies_tokens = list(sf.split_selfies(selfies))
+        
+        # Join dots with the nearest next tokens
+        joined_tokens = []
+        i = 0
+        while i < len(selfies_tokens):
+            if selfies_tokens[i] == '.' and i + 1 < len(selfies_tokens):
+                joined_tokens.append(f".{selfies_tokens[i+1]}")
+                i += 2
+            else:
+                joined_tokens.append(selfies_tokens[i])
+                i += 1
+        
+        selfies_sentence = ' '.join(joined_tokens)
+        return selfies_sentence
+    except sf.EncoderError as e:
+        print(f"Encoder Error: {e}")
+        return None
+
+# Example usage:
+in_smi = "C1CCC2=CN3C=CC4=C5C=CC=CC5=NC4=C3C=C2C1" # Sempervirine (CID168919)
+selfies_sentence = smiles_to_selfies_sentence(in_smi)
+print(selfies_sentence)
+
+"""
+[C] [C] [C] [C] [=C] [N] [C] [=C] [C] [=C] [C] [=C] [C] [=C] [C] [Ring1] [=Branch1] [=N] [C] [Ring1] [=Branch2] [=C] [Ring1] [=N] [C] [=C] [Ring1] [P] [C] [Ring2] [Ring1] [Branch1]
+
+"""
+
+
+Get Top-K Prediction
+Due to my fault not relating label number with target name directly during training, to get the model output human readable target and its corresponding ChemBL34 TID, we need to utilize the "label_dict.json".
+
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch.nn.functional as F
+import json
+
+model_id = "gbyuvd/drugtargetpred-chemselfies"
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+model = AutoModelForSequenceClassification.from_pretrained(model_id)
+
+# Load the label_dict.json file
+with open("label_dict.json", "r") as f:
+    label_dict = json.load(f)
+
+# Create a mapping from label number to CHEMBL ID and target name
+label_to_chembl = {str(info['label']): {'chembl_id': chembl_id, 'target_name': info['target_name']} 
+                   for chembl_id, info in label_dict.items()}
+
+def get_top_k_predictions(selfies_string, k=10):
+    # Tokenize the input
+    inputs = tokenizer(selfies_string, return_tensors="pt", padding=True, truncation=True)
+    
+    # Get the model output
+    with torch.no_grad():
+        outputs = model(**inputs)
+    
+    # Get the probabilities
+    probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
+    
+    # Get the top-k indices and probabilities
+    top_k_probs, top_k_indices = torch.topk(probs, k)
+    
+    # Convert to numpy for easier handling
+    top_k_probs = top_k_probs.squeeze().numpy()
+    top_k_indices = top_k_indices.squeeze().numpy()
+    
+    # Get the class labels and map them to CHEMBL IDs and target names
+    results = []
+    for idx, prob in zip(top_k_indices, top_k_probs):
+        label = str(idx)
+        if label in label_to_chembl:
+            chembl_id = label_to_chembl[label]['chembl_id']
+            target_name = label_to_chembl[label]['target_name']
+            results.append((chembl_id, target_name, prob))
+        else:
+            results.append((f"Unknown_class_{label}", "Unknown target", prob))
+    
+    return results
+
+text = "[C] [C] [C] [C] [=C] [N] [C] [=C] [C] [=C] [C] [=C] [C] [=C] [C] [Ring1] [=Branch1] [=N] [C] [Ring1] [=Branch2] [=C] [Ring1] [=N] [C] [=C] [Ring1] [P] [C] [Ring2] [Ring1] [Branch1]" #Sempervirine (CID168919)
+top_5_predictions = get_top_k_predictions(text, k=5)
+
+print("Top 5 predictions:")
+for chembl_id, target_name, prob in top_5_predictions:
+    print(f"{chembl_id} ({target_name}): {prob:.4f}")
+
+"""
+Top 5 predictions:
+CHEMBL1951 (Monoamine oxidase A): 0.5925
+CHEMBL1914 (Butyrylcholinesterase): 0.0520
+CHEMBL220 (Acetylcholinesterase): 0.0321
+CHEMBL2039 (Monoamine oxidase B): 0.0259
+CHEMBL5113 (Orexin receptor 1): 0.0252
+
+"""
+
+Direct Use using Classifier Pipeline
+You can also use pipeline:
+
+from transformers import pipeline
+
+classifier = pipeline("text-classification", model="gbyuvd/drugtargetpred-chemselfies")
+classifier("[C] [C] [C] [C] [=C] [N] [C] [=C] [C] [=C] [C] [=C] [C] [=C] [C] [Ring1] [=Branch1] [=N] [C] [Ring1] [=Branch2] [=C] [Ring1] [=N] [C] [=C] [Ring1] [P] [C] [Ring2] [Ring1] [Branch1]") #Sempervirine (CID168919)
+# [{'label': 'LABEL_25', 'score': 0.5924742221832275}]
+
+Training Details
+Training Data
+Data Sources
+Bioactive compounds from ChemBL34 (Zdrazil et al., 2023) using its PostgreSQL dump
+
+Data Preparation
+Dataset Details:
+
+Total training examples: 154,700
+Number of classes: 221 distinct human protein drug targets
+Organism: Homo sapiens
+Number of train examples for each class: 700
+Number of validation examples for each class: 100
+Number of held out test examples for each class: 200
+Data Selection Criteria:
+
+Activity types: IC50, Ki, EC50
+Activity threshold: ≤ 10 µM (10,000 nM)
+Assay confidence score: ≥ 7
+Standard relation: Exact matches only ('=')
+SMILES: Canonical representations only
+Data Preprocessing
+
+Conversion from Canonical SMILES into SELFIES readable by base model's tokenizer, any failed entries are removed
+Balancing the data distribution by setting up min max (1000)
+Training Procedure
+Training Hyperparameters
+Batch size = 128
+Num of Epoch= 36 (10, 12, 14; separate run - based on training dynamics, it seems training with one run with lots of epochs is better than doing separate run like this.)
+I am using Ranger21 optimizer with these settings:
+
+Core optimizer = [Madgrad](https://arxiv.org/abs/2101.11075)
+Learning rate of 1.5e-05
+
+Important - num_epochs of training = ** _(10, 12, 14; separate run)_ epochs **
+please confirm this is correct or warmup and warmdown will be off
+
+using AdaBelief for variance computation
+Warm-up: linear warmup, over 2000 iterations
+
+Lookahead active, merging every 5 steps, with blend factor of 0.5
+Norm Loss active, factor = 0.0001
+Stable weight decay of 0.01
+Gradient Centralization = On
+
+Adaptive Gradient Clipping = True
+    clipping value of 0.01
+    steps for clipping = 0.001
+params size saved
+total param groups = 1
+total params in groups = 137
+
+I turned off the warm down, since in prior experiments it led to instability of losses in my case. For more information about Ranger21, you could check out this repository.
+
+Metrics at the last epoch (36th) :
+
+Training Loss: 0.772700
+Validation Loss: 1.299520
+Accuracy: 0.619050
+Macro Precision: 0.612262
+Macro Recall: 0.619050
+Macro F1: 0.611072
+Evaluation
+Testing Data, Factors & Metrics
+Testing Data
+The model was evaluated on a test dataset containing 44,200 samples, with 200 examples per class.
+
+Factors
+The evaluation disaggregated results by individual classes and provided macro and weighted averages across all classes.
+
+Metrics
+The following metrics were used to evaluate the model's performance:
+
+Accuracy: Measures the overall correctness of predictions.
+F1-score: Harmonic mean of precision and recall, providing a balanced measure of the model's performance.
+Precision: Ratio of true positive predictions to all positive predictions.
+Recall: Ratio of true positive predictions to all actual positive instances.
+Both macro (unweighted mean of all classes) and weighted (weighted by class support) averages were calculated for F1-score, precision, and recall.
+
+Results
+General
+Baseline with random guess (1/221): 0.0045
+
+Accuracy: 0.6199
+
+Macro F1: 0.6127
+
+Weighted F1: 0.6127
+
+Macro average:
+
+Precision: 0.6142
+Recall: 0.6199
+F1-score: 0.6127
+Weighted average:
+
+Precision: 0.6142
+Recall: 0.6199
+F1-score: 0.6127
+In Detail
+F1-score 0.9-0.99: 39 classes
+F1-score 0.7-0.8: 23 classes
+F1-score 0.5-0.6: 24 classes
+F1-score 0.4-0.5: 36 classes
+F1-score below 0.4: 49 classes
+Classes with Best Performance (F1>0.9)
+CHEMBL252: Endothelin receptor ET-A (F1: 0.9875)
+CHEMBL4829: Acetyl-CoA carboxylase 2 (F1: 0.9849)
+CHEMBL3713062: Tissue factor pathway inhibitor (F1: 0.9825)
+CHEMBL2176771: Complement factor D (F1: 0.9801)
+CHEMBL3988583: Sepiapterin reductase (F1: 0.9798)
+CHEMBL3572: Cholesteryl ester transfer protein (F1: 0.9776)
+CHEMBL1800: Corticotropin releasing factor receptor 1 (F1: 0.9750)
+CHEMBL4198: Inhibitor of apoptosis protein 3 (F1: 0.9704)
+CHEMBL5137: Metabotropic glutamate receptor 2 (F1: 0.9679)
+CHEMBL5652: Glucose-dependent insulinotropic receptor (F1: 0.9677)
+CHEMBL1985: Glucagon receptor (F1: 0.9674)
+CHEMBL2001: Purinergic receptor P2Y12 (F1: 0.9674)
+CHEMBL2007625: Isocitrate dehydrogenase [NADP] cytoplasmic (F1: 0.9628)
+CHEMBL3820: Hexokinase type IV (F1: 0.9606)
+CHEMBL4550: 5-lipoxygenase activating protein (F1: 0.9606)
+CHEMBL6009: Diacylglycerol O-acyltransferase 1 (F1: 0.9604)
+CHEMBL298: Cholecystokinin B receptor (F1: 0.9582)
+CHEMBL1855: Gonadotropin-releasing hormone receptor (F1: 0.9538)
+CHEMBL1945: Melatonin receptor 1A (F1: 0.9512)
+CHEMBL4561: Neuropeptide Y receptor type 5 (F1: 0.9484)
+CHEMBL4805: P2X purinoceptor 7 (F1: 0.9439)
+CHEMBL5071: G protein-coupled receptor 44 (F1: 0.9438)
+CHEMBL4616: Ghrelin receptor (F1: 0.9409)
+CHEMBL4422: Free fatty acid receptor 1 (F1: 0.9406)
+CHEMBL4441: C-X-C chemokine receptor type 3 (F1: 0.9403)
+CHEMBL248: Leukocyte elastase (F1: 0.9373)
+CHEMBL2998: P2X purinoceptor 3 (F1: 0.9363)
+CHEMBL1744525: Nicotinamide phosphoribosyltransferase (F1: 0.9307)
+CHEMBL1966: Dihydroorotate dehydrogenase (F1: 0.9272)
+CHEMBL5023: p53-binding protein Mdm-2 (F1: 0.9250)
+CHEMBL259: Melanocortin receptor 4 (F1: 0.9246)
+CHEMBL1889: Vasopressin V1a receptor (F1: 0.9173)
+CHEMBL3105: Poly [ADP-ribose] polymerase-1 (F1: 0.9158)
+CHEMBL286: Renin (F1: 0.9148)
+CHEMBL2000: Plasma kallikrein (F1: 0.9109)
+CHEMBL249: Neurokinin 1 receptor (F1: 0.9104)
+CHEMBL2243: Anandamide amidohydrolase (F1: 0.9059)
+CHEMBL284: Dipeptidyl peptidase IV (F1: 0.9037)
+CHEMBL2094135: Gamma-secretase (F1: 0.9020)
+
+Classes with Good Performance (0.7<F1<0.9)
+CHEMBL4015: C-C chemokine receptor type 2 (F1: 0.8993)
+CHEMBL4439: TGF-beta receptor type I (F1: 0.8988)
+CHEMBL1741186: Nuclear receptor ROR-gamma (F1: 0.8985)
+CHEMBL4235: 11-beta-hydroxysteroid dehydrogenase 1 (F1: 0.8967)
+CHEMBL4296: Sodium channel protein type IX alpha subunit (F1: 0.8960)
+CHEMBL4409: Phosphodiesterase 10A (F1: 0.8960)
+CHEMBL4794: Vanilloid receptor (F1: 0.8873)
+CHEMBL3983: Dual specificity protein kinase TTK (F1: 0.8834)
+CHEMBL1163125: Bromodomain-containing protein 4 (F1: 0.8788)
+CHEMBL274: C-C chemokine receptor type 5 (F1: 0.8784)
+CHEMBL3227: Metabotropic glutamate receptor 5 (F1: 0.8715)
+CHEMBL2334: Caspase-3 (F1: 0.8651)
+CHEMBL2047: Bile acid receptor FXR (F1: 0.8628)
+CHEMBL4040: MAP kinase ERK2 (F1: 0.8607)
+CHEMBL6136: Lysine-specific histone demethylase 1 (F1: 0.8544)
+CHEMBL3880: Heat shock protein HSP 90-alpha (F1: 0.8537)
+CHEMBL344: Melanin-concentrating hormone receptor 1 (F1: 0.8449)
+CHEMBL1827: Phosphodiesterase 5A (F1: 0.8325)
+CHEMBL275: Phosphodiesterase 4B (F1: 0.8286)
+CHEMBL3759: Histamine H4 receptor (F1: 0.8286)
+CHEMBL3473: C-C chemokine receptor type 3 (F1: 0.8253)
+CHEMBL2599: Tyrosine-protein kinase SYK (F1: 0.8247)
+CHEMBL1075104: Leucine-rich repeat serine/threonine-protein kinase 2 (F1: 0.8212)
+CHEMBL3778: Interleukin-1 receptor-associated kinase 4 (F1: 0.8177)
+CHEMBL4685: Indoleamine 2,3-dioxygenase (F1: 0.8171)
+CHEMBL2409: Epoxide hydratase (F1: 0.8075)
+CHEMBL5251: Tyrosine-protein kinase BTK (F1: 0.8051)
+CHEMBL5658: Prostaglandin E synthase (F1: 0.7913)
+CHEMBL335: Protein-tyrosine phosphatase 1B (F1: 0.7891)
+CHEMBL331: Cyclin-dependent kinase 4 (F1: 0.7810)
+CHEMBL3717: Hepatocyte growth factor receptor (F1: 0.7656)
+CHEMBL2014: Nociceptin receptor (F1: 0.7632)
+CHEMBL1978: Cytochrome P450 19A1 (F1: 0.7553)
+CHEMBL2111389: CDK9/cyclin T1 (F1: 0.7526)
+CHEMBL4578: Maternal embryonic leucine zipper kinase (F1: 0.7494)
+CHEMBL1906: Serine/threonine-protein kinase RAF (F1: 0.7488)
+CHEMBL4630: Serine/threonine-protein kinase Chk1 (F1: 0.7441)
+CHEMBL3024: Serine/threonine-protein kinase PLK1 (F1: 0.7422)
+CHEMBL3884: Sodium/glucose cotransporter 2 (F1: 0.7409)
+CHEMBL2581: Cathepsin D (F1: 0.7404)
+CHEMBL209: Trypsin I (F1: 0.7333)
+CHEMBL2815: Nerve growth factor receptor Trk-A (F1: 0.7296)
+CHEMBL2695: Focal adhesion kinase 1 (F1: 0.7294)
+CHEMBL3892: Sphingosine 1-phosphate receptor Edg-3 (F1: 0.7211)
+CHEMBL4282: Serine/threonine-protein kinase AKT (F1: 0.7163)
+CHEMBL5393: ATP-binding cassette sub-family G member 2 (F1: 0.7153)
+CHEMBL1957: Insulin-like growth factor I receptor (F1: 0.7115)
+CHEMBL2487: Amyloid-beta A4 protein (F1: 0.7042)
+CHEMBL1871: Androgen Receptor (F1: 0.7040)
+CHEMBL260: MAP kinase p38 alpha (F1: 0.7010)
+
+Classes with Moderate Performance (0.5<F1<0.7)
+CHEMBL5145: Serine/threonine-protein kinase B-raf (F1: 0.6977)
+CHEMBL4302: P-glycoprotein 1 (F1: 0.6957)
+CHEMBL230: Cyclooxygenase-2 (F1: 0.6847)
+CHEMBL2525: Beta secretase 2 (F1: 0.6829)
+CHEMBL3116: Cyclin-dependent kinase 9 (F1: 0.6667)
+CHEMBL4625: Apoptosis regulator Bcl-X (F1: 0.6652)
+CHEMBL2034: Glucocorticoid receptor (F1: 0.6650)
+CHEMBL244: Coagulation factor X (F1: 0.6649)
+CHEMBL264: Histamine H3 receptor (F1: 0.6617)
+CHEMBL4247: ALK tyrosine kinase receptor (F1: 0.6545)
+CHEMBL2276: c-Jun N-terminal kinase 1 (F1: 0.6506)
+CHEMBL4979: Sodium/glucose cotransporter 1 (F1: 0.6467)
+CHEMBL1824: Receptor protein-tyrosine kinase erbB-2 (F1: 0.6447)
+CHEMBL215: Arachidonate 5-lipoxygenase (F1: 0.6416)
+CHEMBL4333: Sphingosine 1-phosphate receptor Edg-1 (F1: 0.6409)
+CHEMBL3706: ADAM17 (F1: 0.6316)
+CHEMBL1844: Macrophage colony stimulating factor receptor (F1: 0.6263)
+CHEMBL208: Progesterone receptor (F1: 0.6253)
+CHEMBL2842: Serine/threonine-protein kinase mTOR (F1: 0.6196)
+CHEMBL1914: Butyrylcholinesterase (F1: 0.6186)
+CHEMBL255: Adenosine A2b receptor (F1: 0.6147)
+CHEMBL287: Sigma opioid receptor (F1: 0.6104)
+CHEMBL3371: Serotonin 6 (5-HT6) receptor (F1: 0.6087)
+CHEMBL204: Thrombin (F1: 0.5959)
+CHEMBL3979: Peroxisome proliferator-activated receptor delta (F1: 0.5919)
+CHEMBL4860: Apoptosis regulator Bcl-2 (F1: 0.5876)
+CHEMBL218: Cannabinoid CB1 receptor (F1: 0.5831)
+CHEMBL2056: Dopamine D1 receptor (F1: 0.5783)
+CHEMBL1862: Tyrosine-protein kinase ABL (F1: 0.5741)
+CHEMBL1908: Cytochrome P450 11B1 (F1: 0.5720)
+CHEMBL246: Beta-3 adrenergic receptor (F1: 0.5650)
+CHEMBL4204: MAP kinase signal-integrating kinase 2 (F1: 0.5504)
+CHEMBL4822: Beta-secretase 1 (F1: 0.5460)
+CHEMBL242: Estrogen receptor beta (F1: 0.5356)
+CHEMBL5407: Serine/threonine-protein kinase PIM3 (F1: 0.5311)
+CHEMBL253: Cannabinoid CB2 receptor (F1: 0.5288)
+CHEMBL262: Glycogen synthase kinase-3 beta (F1: 0.5248)
+CHEMBL219: Dopamine D4 receptor (F1: 0.5246)
+CHEMBL2973: Rho-associated protein kinase 2 (F1: 0.5241)
+CHEMBL4501: Ribosomal protein S6 kinase 1 (F1: 0.5209)
+CHEMBL3973: Fibroblast growth factor receptor 4 (F1: 0.5180)
+CHEMBL2954: Cathepsin S (F1: 0.5172)
+CHEMBL3553: Tyrosine-protein kinase TYK2 (F1: 0.5138)
+CHEMBL4792: Orexin receptor 2 (F1: 0.5133)
+CHEMBL2835: Tyrosine-protein kinase JAK1 (F1: 0.5119)
+CHEMBL235: Peroxisome proliferator-activated receptor gamma (F1: 0.5030)
+CHEMBL1821: Muscarinic acetylcholine receptor M4 (F1: 0.5000)
+
+Classes with Limited Performance (0.3<F1<0.5)
+CHEMBL2039: Monoamine oxidase B (F1: 0.4977)
+CHEMBL4361: Induced myeloid leukemia cell differentiation protein Mcl-1 (F1: 0.4962)
+CHEMBL1951: Monoamine oxidase A (F1: 0.4951)
+CHEMBL206: Estrogen receptor alpha (F1: 0.4948)
+CHEMBL236: Delta opioid receptor (F1: 0.4933)
+CHEMBL239: Peroxisome proliferator-activated receptor alpha (F1: 0.4916)
+CHEMBL267: Tyrosine-protein kinase SRC (F1: 0.4896)
+CHEMBL4072: Cathepsin B (F1: 0.4878)
+CHEMBL268: Cathepsin K (F1: 0.4808)
+CHEMBL2326: Carbonic anhydrase VII (F1: 0.4742)
+CHEMBL1913: Platelet-derived growth factor receptor beta (F1: 0.4717)
+CHEMBL1868: Vascular endothelial growth factor receptor 1 (F1: 0.4676)
+CHEMBL4142: Fibroblast growth factor receptor 2 (F1: 0.4579)
+CHEMBL1898: Serotonin 1b (5-HT1b) receptor (F1: 0.4560)
+CHEMBL3130: PI3-kinase p110-delta subunit (F1: 0.4505)
+CHEMBL4225: Dual specificity protein kinase CLK2 (F1: 0.4476)
+CHEMBL4588: Matrix metalloproteinase 8 (F1: 0.4472)
+CHEMBL4523: Serine/threonine-protein kinase PIM2 (F1: 0.4419)
+CHEMBL3155: Serotonin 7 (5-HT7) receptor (F1: 0.4416)
+CHEMBL238: Dopamine transporter (F1: 0.4403)
+CHEMBL220: Acetylcholinesterase (F1: 0.4375)
+CHEMBL258: Tyrosine-protein kinase LCK (F1: 0.4296)
+CHEMBL1974: Tyrosine-protein kinase receptor FLT3 (F1: 0.4293)
+CHEMBL308: Cyclin-dependent kinase 1 (F1: 0.4276)
+CHEMBL237: Kappa opioid receptor (F1: 0.4270)
+CHEMBL5113: Orexin receptor 1 (F1: 0.4252)
+CHEMBL231: Histamine H1 receptor (F1: 0.4251)
+CHEMBL222: Norepinephrine transporter (F1: 0.4245)
+CHEMBL3729: Carbonic anhydrase IV (F1: 0.4194)
+CHEMBL2722: Cytochrome P450 11B2 (F1: 0.4146)
+CHEMBL4722: Serine/threonine-protein kinase Aurora-A (F1: 0.4126)
+CHEMBL216: Muscarinic acetylcholine receptor M1 (F1: 0.4092)
+CHEMBL3192: Histone deacetylase 8 (F1: 0.4078)
+CHEMBL1829: Histone deacetylase 3 (F1: 0.4073)
+CHEMBL1833: Serotonin 2b (5-HT2b) receptor (F1: 0.4026)
+CHEMBL203: Epidermal growth factor receptor erbB1 (F1: 0.4023)
+CHEMBL280: Matrix metalloproteinase 13 (F1: 0.3957)
+CHEMBL3231: Rho-associated protein kinase 1 (F1: 0.3923)
+CHEMBL210: Beta-2 adrenergic receptor (F1: 0.3911)
+CHEMBL256: Adenosine A3 receptor (F1: 0.3826)
+CHEMBL1936: Stem cell growth factor receptor (F1: 0.3786)
+CHEMBL245: Muscarinic acetylcholine receptor M3 (F1: 0.3774)
+CHEMBL3145: PI3-kinase p110-beta subunit (F1: 0.3697)
+CHEMBL213: Beta-1 adrenergic receptor (F1: 0.3696)
+CHEMBL3837: Cathepsin L (F1: 0.3684)
+CHEMBL2742: Fibroblast growth factor receptor 3 (F1: 0.3669)
+CHEMBL2148: Tyrosine-protein kinase JAK3 (F1: 0.3621)
+CHEMBL223: Alpha-1d adrenergic receptor (F1: 0.3579)
+CHEMBL2147: Serine/threonine-protein kinase PIM1 (F1: 0.3578)
+CHEMBL3650: Fibroblast growth factor receptor 1 (F1: 0.3386)
+CHEMBL283: Matrix metalloproteinase 3 (F1: 0.3379)
+CHEMBL289: Cytochrome P450 2D6 (F1: 0.3315)
+CHEMBL3242: Carbonic anhydrase XII (F1: 0.3229)
+CHEMBL214: Serotonin 1a (5-HT1a) receptor (F1: 0.3204)
+CHEMBL234: Dopamine D3 receptor (F1: 0.3204)
+CHEMBL1983: Serotonin 1d (5-HT1d) receptor (F1: 0.3150)
+CHEMBL4005: PI3-kinase p110-alpha subunit (F1: 0.3109)
+CHEMBL2292: Dual-specificity tyrosine-phosphorylation regulated kinase 1A (F1: 0.3096)
+CHEMBL321: Matrix metalloproteinase 9 (F1: 0.3056)
+CHEMBL211: Muscarinic acetylcholine receptor M2 (F1: 0.3030)
+
+Classes with Poor Performance (0.1<F1<0.3)
+CHEMBL301: Cyclin-dependent kinase 2 (F1: 0.2981)
+CHEMBL251: Adenosine A2a receptor (F1: 0.2963)
+CHEMBL332: Matrix metalloproteinase-1 (F1: 0.2959)
+CHEMBL3267: PI3-kinase p110-gamma subunit (F1: 0.2880)
+CHEMBL1937: Histone deacetylase 2 (F1: 0.2857)
+CHEMBL2185: Serine/threonine-protein kinase Aurora-B (F1: 0.2849)
+CHEMBL325: Histone deacetylase 1 (F1: 0.2799)
+CHEMBL226: Adenosine A1 receptor (F1: 0.2739)
+CHEMBL340: Cytochrome P450 3A4 (F1: 0.2733)
+CHEMBL1865: Histone deacetylase 6 (F1: 0.2633)
+CHEMBL224: Serotonin 2a (5-HT2a) receptor (F1: 0.2521)
+CHEMBL225: Serotonin 2c (5-HT2c) receptor (F1: 0.2520)
+CHEMBL205: Carbonic anhydrase II (F1: 0.2507)
+CHEMBL232: Alpha-1b adrenergic receptor (F1: 0.2234)
+CHEMBL233: Mu opioid receptor (F1: 0.2201)
+CHEMBL279: Vascular endothelial growth factor receptor 2 (F1: 0.2194)
+CHEMBL240: HERG (F1: 0.2188)
+CHEMBL229: Alpha-1a adrenergic receptor (F1: 0.2120)
+CHEMBL3397: Cytochrome P450 2C9 (F1: 0.2065)
+CHEMBL261: Carbonic anhydrase I (F1: 0.1833)
+CHEMBL333: Matrix metalloproteinase-2 (F1: 0.1763)
+CHEMBL228: Serotonin transporter (F1: 0.1625)
+CHEMBL2971: Tyrosine-protein kinase JAK2 (F1: 0.1571)
+CHEMBL3594: Carbonic anhydrase IX (F1: 0.1529)
+CHEMBL217: Dopamine D2 receptor (F1: 0.1306)
+
+Model Examination
+You can visualize its attention heads using BertViz and attribution weights using Captum - as done in the base model in Interpretability section.
+
+Technical Specifications
+Model Architecture and Objective
+Base Model: gbyuvd/chemselfies-base-bertmlm
+Embedding Dimension: 320
+Layers: 8
+Attention Heads: 4
+Hidden Size: 320
+Intermediate Size: 1280 (4x Hidden Size)
+Attention Type: Scaled Dot Product Attention (SDPA)
+Vocabulary Size: 3095
+Maximum Sequence Length: 512
+Output Classes: 221
+Compute Infrastructure
+Hardware
+Platform: Paperspace's Gradients
+Compute: Free-A4000 (45 GB RAM, 8 vCPU)
+Software
+Python: 3.9.13
+Transformers: 4.42.4
+PyTorch: 2.3.1+cu121
+Accelerate: 0.32.0
+Datasets: 2.20.0
+Tokenizers: 0.19.1
+Ranger21: 0.0.1
+Selfies: 2.1.2
+RDKit: 2024.3.3
+Citation
+If you find this project useful in your research and wish to cite it, please use the following BibTex entry:
+
+@software{chemfie_basebertmlm,
+  author = {GP Bayu},
+  title = {{ChemFIE Base}: Pretraining A Lightweight BERT-like model on Molecular SELFIES},
+  url = {https://huggingface.co/gbyuvd/chemselfies-base-bertmlm},
+  version = {1.0},
+  year = {2024},
+}
+
+References
+ChemBL34
+
+`@article{zdrazil2023chembl,
+  title={The ChEMBL Database in 2023: a drug discovery platform spanning multiple bioactivity data types and time periods},
+  author={Zdrazil, Barbara and Felix, Eloy and Hunter, Fiona and Manners, Emma J and Blackshaw, James and Corbett, Sybilla and de Veij, Marleen and Ioannidis, Harris and Lopez, David Mendez and Mosquera, Juan F and Magarinos, Maria Paula and Bosc, Nicolas and Arcila, Ricardo and Kizil{\"o}ren, Tevfik and Gaulton, Anna and Bento, A Patr{\'i}cia and Adasme, Melissa F and Monecke, Peter and Landrum, Gregory A and Leach, Andrew R},
+  journal={Nucleic Acids Research},
+  year={2023},
+  volume={gkad1004},
+  doi={10.1093/nar/gkad1004}
+}
+
+@misc{chembl34,
+  title={ChemBL34},
+  year={2023},
+  doi={10.6019/CHEMBL.database.34}
+}
+
+SELFIES
+
+@article{krenn2020selfies,
+  title={Self-referencing embedded strings (SELFIES): A 100\% robust molecular string representation},
+  author={Krenn, Mario and H{\"a}se, Florian and Nigam, AkshatKumar and Friederich, Pascal and Aspuru-Guzik, Alan},
+  journal={Machine Learning: Science and Technology},
+  volume={1},
+  number={4},
+  pages={045024},
+  year={2020},
+  doi={10.1088/2632-2153/aba947}
+}
+
+Ranger21
+
+@article{wright2021ranger21,
+      title={Ranger21: a synergistic deep learning optimizer}, 
+      author={Wright, Less and Demeure, Nestor},
+      year={2021},
+      journal={arXiv preprint arXiv:2106.13731},
+}
